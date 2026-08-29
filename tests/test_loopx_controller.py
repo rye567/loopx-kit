@@ -62,6 +62,11 @@ class LoopxControllerTest(unittest.TestCase):
     def write_state(self, run_id, state):
         (self.run_dir(run_id) / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
+    def force_current_stage(self, run_id, stage):
+        state = self.read_state(run_id)
+        state["current_stage"] = stage
+        self.write_state(run_id, state)
+
     def answer_interview_artifact(self, run_id):
         artifact = self.run_dir(run_id) / "artifacts" / "interview.md"
         artifact.write_text("""# 需求采访
@@ -583,6 +588,7 @@ items:
         run_dir = self.tmp / "docs" / "loopx" / "runs" / "strict-spec-run"
         artifact = run_dir / "artifacts" / "spec.md"
         artifact.write_text("# Requirement Spec\n\n## Summary\n\nOnly a summary.\n", encoding="utf-8")
+        self.force_current_stage("strict-spec-run", "spec_review")
         self.controller.main([
             "record-stage",
             "--run-id",
@@ -653,6 +659,7 @@ Edges.
 
 LIGHT.
 """, encoding="utf-8")
+        self.force_current_stage("strict-empty-spec-run", "spec_review")
         self.controller.main([
             "record-stage",
             "--run-id",
@@ -691,6 +698,7 @@ LIGHT.
             "--project",
             str(self.tmp),
         ], stdout=io.StringIO())
+        self.force_current_stage("strict-final-run", "final_report")
         self.controller.main([
             "record-stage",
             "--run-id",
@@ -722,6 +730,7 @@ LIGHT.
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         state["git_gate"]["status"] = "PASS"
         state["git_gate"]["diff_summary"] = "M loopx/tools/loopx_controller.py"
+        state["current_stage"] = "release_readiness"
         (run_dir / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         self.controller.main([
             "record-stage",
@@ -947,6 +956,7 @@ decision: captured
             str(self.tmp),
         ], stdout=io.StringIO())
         run_dir = self.tmp / "docs" / "loopx" / "runs" / "strict-tracking-run"
+        self.force_current_stage("strict-tracking-run", "solution_design")
         self.controller.main([
             "record-stage",
             "--run-id",
@@ -991,6 +1001,7 @@ decision: captured
         run_dir = self.tmp / "docs" / "loopx" / "runs" / "strict-full-final-run"
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         state["stages"]["final_report"] = "PASS"
+        state["current_stage"] = "final_report"
         state["git_gate"]["status"] = "PASS"
         state["git_gate"]["diff_summary"] = "M README.md"
         (run_dir / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -1040,6 +1051,7 @@ decision: captured
         self.assertIn("FAIL 运行无法收口：close-run", out.getvalue())
         self.assertIn("收口前，final_report 必须为 PASS", out.getvalue())
 
+        self.force_current_stage("close-run", "final_report")
         self.controller.main([
             "record-stage",
             "--run-id",
@@ -1057,6 +1069,7 @@ decision: captured
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         state["git_gate"]["status"] = "PASS"
         state["git_gate"]["diff_summary"] = "M README.md"
+        state["current_stage"] = "release_readiness"
         (run_dir / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         self.controller.main([
             "record-stage",
@@ -1291,6 +1304,7 @@ decision: captured
         self.answer_interview_artifact("light-gate-run")
 
         def record(stage, status):
+            self.force_current_stage("light-gate-run", stage)
             out = io.StringIO()
             code = self.controller.main([
                 "record-stage",
@@ -1323,6 +1337,7 @@ decision: captured
         ], stdout=out)
         record("spec_draft", "PASS")
         record("spec_review", "SKIPPED")
+        self.force_current_stage("light-gate-run", "mode_selection")
 
         out = io.StringIO()
         code = self.controller.main([
@@ -1479,6 +1494,7 @@ decision: captured
         ], stdout=io.StringIO())
         run_dir = self.tmp / "docs" / "loopx" / "runs" / "repair-limit-run"
         for _ in range(3):
+            self.force_current_stage("repair-limit-run", "solution_review")
             out = io.StringIO()
             code = self.controller.main([
                 "fail-review",
@@ -1573,6 +1589,7 @@ decision: captured
         self.assertIn("阶段 health_gate 状态为 CHANGES_REQUIRED", out.getvalue())
 
         # 登记指向 development 的返工单后：修复性写入放行（不再死锁）。
+        self.force_current_stage("repair-write-run", "health_gate")
         self.controller.main([
             "fail-review",
             "--run-id",
@@ -1628,6 +1645,7 @@ decision: captured
         }
         (run_dir / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         # 即使有指向 development 的开放返工单，BLOCKED 也必须锁定写入（等待人工处理）。
+        self.force_current_stage("blocked-write-run", "health_gate")
         self.controller.main([
             "fail-review",
             "--run-id",
@@ -1671,6 +1689,7 @@ decision: captured
         ], stdout=io.StringIO())
         run_dir = self.tmp / "docs" / "loopx" / "runs" / "repair-recover-run"
         for _ in range(3):
+            self.force_current_stage("repair-recover-run", "solution_review")
             self.controller.main([
                 "fail-review",
                 "--run-id",
@@ -1962,6 +1981,45 @@ decision: captured
         self.assertEqual(state["current_stage"], "solution_design")
         self.assertIn("PASS 已进入阶段：solution_design", out.getvalue())
 
+    def test_next_does_not_partially_write_before_atomic_commit(self):
+        run_id = "next-atomic-run"
+        self.controller.main([
+            "init",
+            "下一阶段原子推进",
+            "--run-id",
+            run_id,
+            "--project",
+            str(self.tmp),
+        ], stdout=io.StringIO())
+        run_dir = self.run_dir(run_id)
+        state = self.read_state(run_id)
+        state["current_stage"] = "mode_selection"
+        state["stages"] = {
+            "environment_check": "PASS",
+            "requirement_intake": "PASS",
+            "requirement_interview": "PASS",
+            "spec_draft": "PASS",
+            "spec_review": "PASS",
+            "mode_selection": "PASS",
+        }
+        self.write_state(run_id, state)
+        tracked = [run_dir / "state.json", run_dir / "worklist.yml", run_dir / "events.jsonl"]
+        before = {path: path.read_bytes() for path in tracked}
+
+        with mock.patch(
+            "loopx_controller_core.update_worklist_state_data",
+            side_effect=KeyboardInterrupt("模拟进程中断"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                self.controller.main([
+                    "next",
+                    run_id,
+                    "--project",
+                    str(self.tmp),
+                ], stdout=io.StringIO())
+
+        self.assertEqual(before, {path: path.read_bytes() for path in tracked})
+
     def test_record_stage_writes_machine_readable_result_and_state(self):
         self.controller.main([
             "init",
@@ -1972,6 +2030,7 @@ decision: captured
             str(self.tmp),
         ], stdout=io.StringIO())
 
+        self.force_current_stage("record-run", "solution_design")
         out = io.StringIO()
         code = self.controller.main([
             "record-stage",
@@ -2513,6 +2572,7 @@ items:
             str(self.tmp),
         ], stdout=io.StringIO())
 
+        self.force_current_stage("repair-run", "solution_review")
         out = io.StringIO()
         code = self.controller.main([
             "fail-review",
@@ -2564,6 +2624,7 @@ items:
             "--project",
             str(self.tmp),
         ], stdout=io.StringIO())
+        self.force_current_stage("claim-run", "solution_review")
         self.controller.main([
             "fail-review",
             "--run-id",
@@ -2606,6 +2667,7 @@ items:
             "--project",
             str(self.tmp),
         ], stdout=io.StringIO())
+        self.force_current_stage("close-run", "solution_review")
         self.controller.main([
             "fail-review",
             "--run-id",
@@ -2667,6 +2729,7 @@ items:
             "mode_selection": "PASS",
             "solution_design": "PASS",
         }
+        state["current_stage"] = "solution_review"
         (run_dir / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         self.controller.main([
             "fail-review",

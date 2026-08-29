@@ -18,6 +18,8 @@
 - 结构或证据检查失败时，不得写入部分阶段结果、状态、工作项或事件。
 - 执行深度和上游放行条件无效时不得允许开发写入。
 - commit、push、deploy、破坏性删除、生产写入等高风险动作必须人工确认。
+- `auto_until_blocked` 只能来自 init 的显式用户授权；它不跳阶段、不覆盖 BLOCKED，也不替代高风险确认。
+- 并行 agent 只能返回绑定同一 snapshot 的候选结果，禁止并行写 state 或调用 `record-stage`；controller 负责按原阶段顺序单点提交。
 
 ## 输出
 

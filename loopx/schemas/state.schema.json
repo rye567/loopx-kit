@@ -30,6 +30,12 @@
     "policy_snapshot_sha256": {
       "type": "string"
     },
+    "source_baseline": {
+      "type": "string"
+    },
+    "last_solution_review": {
+      "type": "object"
+    },
     "run_id": {
       "type": "string"
     },
@@ -71,6 +77,15 @@
         "type": "string"
       }
     },
+    "automation_policy": {
+      "type": "object",
+      "required": ["mode", "authorized_by", "authorized_at"],
+      "properties": {
+        "mode": {"type": "string", "enum": ["gated", "auto_until_blocked"]},
+        "authorized_by": {"type": "string"},
+        "authorized_at": {"type": "string"}
+      }
+    },
     "max_auto_repair": {
       "type": "integer"
     },
@@ -108,6 +123,9 @@
       "type": "object"
     },
     "stages": {
+      "type": "object"
+    },
+    "stage_timing": {
       "type": "object"
     }
   }

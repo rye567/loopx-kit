@@ -116,6 +116,9 @@ def spec_state(run_id):
         "artifact": f"docs/loopx/runs/{run_id}/artifacts/spec.md",
         "approved": False,
         "gate_result": "PENDING",
+        "extensions": {
+            "requirement_manifest": f"docs/loopx/runs/{run_id}/artifacts/requirement-manifest.json",
+        },
     }
 
 
@@ -140,6 +143,36 @@ def tracking_state(run_id):
     }
 
 
+def start_stage_timing(state, stage):
+    """记录阶段开始时间；重复进入同一阶段会增加 attempt。"""
+
+    timing = state.setdefault("stage_timing", {}).setdefault(stage, {})
+    timing["started_at"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    timing.pop("finished_at", None)
+    timing.pop("duration_ms", None)
+    timing["attempt"] = int(timing.get("attempt") or 0) + 1
+    return timing
+
+
+def finish_stage_timing(state, stage):
+    timing = state.setdefault("stage_timing", {}).setdefault(stage, {})
+    # BLOCKED/CHANGES_REQUIRED 后直接重录当前阶段时，应开启新 attempt，
+    # 不能把人工等待或返工间隔累计到上一次执行时长。
+    if timing.get("finished_at"):
+        timing = start_stage_timing(state, stage)
+    finished = datetime.now().astimezone()
+    started_raw = timing.get("started_at")
+    if started_raw:
+        started = datetime.fromisoformat(started_raw)
+    else:
+        started = finished
+        timing["started_at"] = finished.isoformat(timespec="milliseconds")
+        timing["attempt"] = int(timing.get("attempt") or 0) + 1
+    timing["finished_at"] = finished.isoformat(timespec="milliseconds")
+    timing["duration_ms"] = max(0, int((finished - started).total_seconds() * 1000))
+    return dict(timing)
+
+
 def update_worklist_state(project, state, stage=None, stage_status=None):
     # worklist 是给人和 agent 看的同步视图，真实状态仍以 state.json 为准。
     try:
@@ -155,6 +188,7 @@ def update_worklist_state_data(worklist, state, stage=None, stage_status=None):
 
     worklist.setdefault("run", {})["current_stage"] = state.get("current_stage")
     worklist["run"]["mode"] = state.get("mode", "")
+    worklist["run"]["status"] = state.get("status", "ACTIVE")
     worklist["run"]["next_action"] = state.get("next_action", "")
     if "spec" in state:
         worklist["spec"] = {

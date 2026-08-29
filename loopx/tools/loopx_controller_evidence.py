@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import json
 
-from loopx_controller_io import load_schema, loopx_root, validate_schema
+from loopx_controller_io import (
+    get_run_dir,
+    load_schema,
+    loopx_root,
+    read_json,
+    source_snapshot_id,
+    validate_schema,
+)
 from loopx_controller_policy import (
     load_policy_snapshot,
     required_artifacts_for_stage,
@@ -24,12 +31,107 @@ from loopx_controller_evidence_shared import (
     RULE_RESULT_STATUSES,
     resolve_project_file,
 )
-from loopx_controller_evidence_semantics import SEMANTIC_VALIDATORS
+from loopx_controller_evidence_semantics import SEMANTIC_VALIDATORS, validate_review_assurance
 from loopx_controller_evidence_workitems import (
     WORK_ITEM_INPUT_FIELDS,
     runtime_work_items,
     validate_work_item_references,
 )
+from loopx_controller_tickets import iter_repair_tickets
+from loopx_controller_requirements import (
+    canonical_json_sha256,
+    file_sha256,
+    prepare_requirement_freeze,
+    requires_requirement_manifest,
+    validate_artifact_requirements,
+)
+
+
+def _review_content(artifact):
+    """去掉审核结论字段后比较方案内容，防止审核产物偷换设计方案。"""
+
+    value = json.loads(json.dumps(artifact))
+    value.pop("stage", None)
+    value.pop("rule_results", None)
+    extensions = value.get("extensions") or {}
+    extensions.pop("review_assurance", None)
+    value["extensions"] = extensions
+    return value
+
+
+def _solution_review_binding(project, state, review_artifact, source_baseline=None):
+    result_path = get_run_dir(project, state.get("run_id")) / "stage-results" / "06-solution-design.json"
+    if not result_path.is_file():
+        raise ValueError("solution_review 前缺少已记录的 solution_design 结果")
+    design_result = read_json(result_path)
+    if design_result.get("status") not in {"PASS", "ACCEPTED_RISK"}:
+        raise ValueError("solution_review 前的 solution_design 尚未通过")
+    design_entry = next(
+        (entry for entry in design_result.get("artifacts") or [] if entry.get("type") == "solution"),
+        None,
+    )
+    if not design_entry:
+        raise ValueError("solution_design 结果未记录 solution 产物")
+    _, design_path = resolve_project_file(project, design_entry.get("path"), "solution_design 产物")
+    design_artifact = _read_json_artifact(design_path, "solution_design 产物")
+    recorded_design_sha256 = design_entry.get("sha256")
+    if not recorded_design_sha256:
+        raise ValueError("solution_design 结果缺少已冻结的产物摘要")
+    if file_sha256(design_path) != recorded_design_sha256:
+        raise ValueError("solution_design 产物在记录通过后发生变化；请返回方案设计阶段重新记录")
+    if _review_content(review_artifact) != _review_content(design_artifact):
+        raise ValueError("solution_review 产物与已记录的 solution_design 内容不一致；请先返回方案设计阶段")
+    reviewed_snapshot_id = recorded_design_sha256
+    current_source_baseline = source_baseline if source_baseline is not None else source_snapshot_id(project)
+    contract = {
+        "policy_snapshot_sha256": state.get("policy_snapshot_sha256") or "",
+        "requirement_manifest_sha256": (state.get("spec") or {}).get("extensions", {}).get(
+            "requirement_manifest_sha256"
+        ) or "",
+        "spec_artifact_sha256": (state.get("spec") or {}).get("extensions", {}).get("spec_artifact_sha256") or "",
+        "source_baseline": current_source_baseline,
+    }
+    return reviewed_snapshot_id, canonical_json_sha256(contract), current_source_baseline
+
+
+def _validate_review_binding(project, state, artifact, recorded_result=None):
+    errors = validate_review_assurance(artifact)
+    if errors:
+        return errors, "", "", ""
+    recorded_source_baseline = (
+        recorded_result.get("review_source_snapshot_id") if recorded_result is not None else None
+    )
+    reviewed_snapshot_id, contract_digest, current_source_baseline = _solution_review_binding(
+        project, state, artifact, source_baseline=recorded_source_baseline,
+    )
+    assurance = artifact["extensions"]["review_assurance"]
+    if assurance.get("reviewed_snapshot_id") != reviewed_snapshot_id:
+        errors.append("review_assurance.reviewed_snapshot_id 与已记录的 solution_design 内容摘要不一致")
+    if assurance.get("review_kind") == "DELTA":
+        if recorded_result is None and (
+            current_source_baseline == "UNAVAILABLE"
+            or state.get("source_baseline") in {None, "", "UNAVAILABLE"}
+        ):
+            errors.append("源码快照不可用，无法证明 DELTA 审核基线未变；必须执行 FULL 方案审核")
+        if recorded_result is not None:
+            if assurance.get("baseline_snapshot_id") != recorded_result.get("review_baseline_snapshot_id"):
+                errors.append("DELTA 审核基线与已记录阶段结果不一致")
+        else:
+            previous = state.get("last_solution_review") or {}
+            if assurance.get("baseline_snapshot_id") != previous.get("reviewed_snapshot_id"):
+                errors.append("DELTA 审核的 baseline_snapshot_id 必须引用上一次已记录的方案审核快照")
+            if previous.get("review_input_contract_sha256") != contract_digest:
+                errors.append("需求、规格、策略或源码基线已变化，必须执行 FULL 方案审核")
+    if recorded_result is not None:
+        if recorded_result.get("reviewed_snapshot_id") != reviewed_snapshot_id:
+            errors.append("已记录阶段结果的 reviewed_snapshot_id 与当前方案设计不一致")
+        if recorded_result.get("review_input_contract_sha256") != contract_digest:
+            errors.append("已记录阶段结果的审核输入契约摘要不一致")
+        if recorded_result.get("review_kind") != assurance.get("review_kind"):
+            errors.append("已记录阶段结果的 review_kind 与审核产物不一致")
+        if recorded_result.get("review_source_snapshot_id") != current_source_baseline:
+            errors.append("已记录阶段结果的 review_source_snapshot_id 与审核输入不一致")
+    return errors, reviewed_snapshot_id, contract_digest, current_source_baseline
 
 
 def _read_json_artifact(path, label):
@@ -131,7 +233,9 @@ def _validate_rule_results(stage, status, rules, results, accepted_risk_ids):
             raise ValueError(f"规则 {rule_id} 通过时必须提供有效证据文件")
 
 
-def prepare_v2_stage_record(project, state, stage, status, evidence, artifacts, affected_work_items, worklist):
+def prepare_v2_stage_record(
+    project, state, stage, status, evidence, artifacts, affected_work_items, worklist, recorded_result=None,
+):
     """在任何持久化前完成 v2 阶段输入检查并返回规范化数据。"""
 
     if status == "ACCEPTED_RISK":
@@ -152,6 +256,8 @@ def prepare_v2_stage_record(project, state, stage, status, evidence, artifacts, 
     loaded = {}
     all_rule_results = []
     all_evidence = []
+    review_binding = None
+    review_source_baseline = None
     for artifact_type, raw_path in artifact_inputs.items():
         if artifact_type not in ARTIFACT_SCHEMAS:
             raise ValueError(f"未知产物类型：{artifact_type}")
@@ -185,8 +291,48 @@ def prepare_v2_stage_record(project, state, stage, status, evidence, artifacts, 
                 semantic_errors = semantic(artifact)
             if semantic_errors:
                 raise ValueError(f"{artifact_type} 产物语义校验失败：\n- " + "\n- ".join(semantic_errors))
+        if (
+            artifact_type == "solution"
+            and stage == "solution_review"
+            and requires_requirement_manifest(snapshot)
+        ):
+            binding_errors, reviewed_snapshot_id, contract_digest, review_source_baseline = _validate_review_binding(
+                project, state, artifact, recorded_result=recorded_result,
+            )
+            if binding_errors:
+                raise ValueError(f"solution 产物审核绑定校验失败：\n- " + "\n- ".join(binding_errors))
+            review_binding = {
+                "reviewed_snapshot_id": reviewed_snapshot_id,
+                "review_input_contract_sha256": contract_digest,
+                "review_source_snapshot_id": review_source_baseline,
+                "review_kind": artifact["extensions"]["review_assurance"]["review_kind"],
+                "review_baseline_snapshot_id": artifact["extensions"]["review_assurance"].get(
+                    "baseline_snapshot_id"
+                ) or "",
+            }
+        requirement_errors = validate_artifact_requirements(project, state, artifact_type, artifact)
+        if requirement_errors:
+            raise ValueError(f"{artifact_type} 需求全集校验失败：\n- " + "\n- ".join(requirement_errors))
+        if (
+            artifact_type == "solution"
+            and stage == "solution_review"
+            and status == "PASS"
+            and requires_requirement_manifest(snapshot)
+        ):
+            assurance = (artifact.get("extensions") or {}).get("review_assurance") or {}
+            if assurance.get("blocking_findings"):
+                raise ValueError("solution_review 通过前必须清空 review_assurance.blocking_findings")
+            if assurance.get("unknowns"):
+                raise ValueError("solution_review 通过前必须清空 review_assurance.unknowns")
+            dimensions = assurance.get("checked_dimensions") or {}
+            unknown = [name for name, verdict in dimensions.items() if verdict.get("status") == "UNKNOWN"]
+            if unknown:
+                raise ValueError("solution_review 存在 UNKNOWN 子结论：" + ", ".join(sorted(unknown)))
         loaded[artifact_type] = artifact
-        artifact_entries.append({"type": artifact_type, "path": relative})
+        artifact_entry = {"type": artifact_type, "path": relative}
+        if requires_requirement_manifest(snapshot):
+            artifact_entry["sha256"] = file_sha256(path)
+        artifact_entries.append(artifact_entry)
         all_evidence.extend((document_relative, relative))
         for raw in _embedded_evidence_values(artifact):
             embedded_relative, _ = resolve_project_file(project, raw, f"{artifact_type} 内嵌证据")
@@ -222,14 +368,29 @@ def prepare_v2_stage_record(project, state, stage, status, evidence, artifacts, 
         solution = loaded.get("solution")
         if not solution:
             raise ValueError("方案设计通过前必须提供 solution 产物")
-        solution_items = runtime_work_items(solution.get("work_items"))
+        protected_ids = {
+            ticket.get("item")
+            for ticket in iter_repair_tickets(project, state.get("run_id"), state)
+            if ticket.get("status") == "OPEN" and ticket.get("item")
+        }
+        solution_items = runtime_work_items(
+            solution.get("work_items"),
+            existing_items=worklist.get("items") or [],
+            protected_ids=protected_ids,
+        )
         extra_ids = {item["id"] for item in solution_items}
     validate_work_item_references(worklist, affected_work_items, extra_ids=extra_ids)
+    spec_freeze = None
+    if stage == "spec_review" and status == "PASS" and requires_requirement_manifest(snapshot):
+        spec_freeze = prepare_requirement_freeze(project, state)
     return {
         "artifacts": artifact_entries,
         "rule_results": canonical_results,
         "evidence": all_evidence,
         "solution_items": solution_items,
+        "spec_freeze": spec_freeze,
+        "review_binding": review_binding,
+        "review_source_baseline": review_source_baseline,
     }
 
 
@@ -250,6 +411,7 @@ def validate_recorded_v2_stage(project, state, stage, result, worklist):
         artifact_map,
         result.get("affected_work_items") or [],
         worklist,
+        recorded_result=result,
     )
     if prepared["artifacts"] != result.get("artifacts"):
         raise ValueError(f"阶段 {stage} 的产物路径不是规范化项目内路径")
@@ -257,6 +419,10 @@ def validate_recorded_v2_stage(project, state, stage, result, worklist):
         raise ValueError(f"阶段 {stage} 的规则结果与产物不一致")
     if prepared["evidence"] != result.get("evidence"):
         raise ValueError(f"阶段 {stage} 的证据集合与产物不一致")
+    if prepared.get("review_binding"):
+        for key, value in prepared["review_binding"].items():
+            if result.get(key) != value:
+                raise ValueError(f"阶段 {stage} 的 {key} 与审核产物不一致")
     if prepared["solution_items"] is not None:
         expected = {
             item["id"]: {key: item[key] for key in WORK_ITEM_INPUT_FIELDS}

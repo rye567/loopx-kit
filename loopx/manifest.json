@@ -16,6 +16,7 @@
     "schemas": [
       "schemas/standard-catalog.schema.json",
       "schemas/project-policy.schema.json",
+      "schemas/requirement-manifest.schema.json",
       "schemas/solution.schema.json",
       "schemas/test-plan.schema.json",
       "schemas/development-evidence.schema.json",

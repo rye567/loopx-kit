@@ -18,6 +18,14 @@
 
 ## 可测试性检查
 
+## 需求全集冻结
+
+- requirement IDs：
+- acceptance IDs：
+- delivery units / 依赖：
+- deferred / 用户确认凭据：
+- `requirement_manifest_sha256`：由 controller 在 `spec_review PASS` 时写入 state。
+
 ## 必需修改
 
 ```yaml

@@ -8,6 +8,25 @@
 - 回退阶段：
 - 下一阶段：
 
+## 五项子结论
+
+| 维度 | 结论（PASS / NOT_APPLICABLE / UNKNOWN） | 证据 | 理由 |
+|---|---|---|---|
+| 需求与验收全集覆盖 | | | |
+| 满足需求的最小修改 | | | |
+| 现有功能完整性与准确性 | | | |
+| 内外部接口契约 | | | |
+| 验证、回滚与发布 | | | |
+
+## 审核完整性
+
+- `reviewed_snapshot_id`（已记录 solution_design JSON 文件的 SHA-256）：
+- `review_kind`：FULL / DELTA
+- `baseline_snapshot_id`（DELTA 必填，必须引用上一次已记录审核快照）：
+- 首轮 blocking findings：
+- unknowns：
+- completeness attestation：
+
 ## stage_result
 
 ```yaml

@@ -33,6 +33,7 @@ from loopx_controller_io import (
 from loopx_controller_state import mode_rank
 from loopx_controller_yaml import YamlSubsetError, parse_yaml_subset
 from loopx_controller_policy import is_v2_run, load_policy_snapshot
+from loopx_controller_requirements import requires_requirement_manifest, validate_frozen_requirements
 
 
 def strict_validation_errors(project, run_id, state, worklist):
@@ -47,6 +48,13 @@ def strict_validation_errors(project, run_id, state, worklist):
             errors.append(f"严格检查要求 state.{key} 存在")
     if errors:
         return errors
+    if requires_requirement_manifest(state) and state.get("stages", {}).get("spec_review") in PASSING_STATUSES:
+        errors.extend(validate_frozen_requirements(project, state))
+    automation = state.get("automation_policy") or {}
+    if automation.get("mode") == "auto_until_blocked" and (
+        automation.get("authorized_by") != "user_cli" or not automation.get("authorized_at")
+    ):
+        errors.append("auto_until_blocked 缺少 init 显式授权来源或时间")
     for state_key, schema_name in (
         ("interview", "interview"),
         ("spec", "spec"),
@@ -71,6 +79,8 @@ def strict_validation_errors(project, run_id, state, worklist):
     for stage, status in state.get("stages", {}).items():
         if status == "SKIPPED" and stage not in skippable:
             errors.append(f"{state.get('mode')} 执行等级不允许将阶段 {stage} 设为 SKIPPED")
+        if status == "BLOCKED":
+            errors.append(f"阶段 {stage} 仍为 BLOCKED，必须先解除阻塞")
     if state.get("stages", {}).get("final_report") == "PASS":
         # final_report 是收口入口，必须同时有发布准备、Git 摘要和复利沉淀决策。
         release_status = state.get("stages", {}).get("release_readiness")
@@ -93,6 +103,10 @@ def strict_validation_errors(project, run_id, state, worklist):
             errors.append(f"worklist.stages 必须包含 {stage}")
     if worklist.get("run", {}).get("current_stage") != state.get("current_stage"):
         errors.append("worklist.run.current_stage 必须与 state.current_stage 一致")
+    if worklist.get("run", {}).get("status") != state.get("status"):
+        errors.append("worklist.run.status 必须与 state.status 一致")
+    if worklist.get("run", {}).get("next_action", "") != state.get("next_action", ""):
+        errors.append("worklist.run.next_action 必须与 state.next_action 一致")
     for stage, status in state.get("stages", {}).items():
         worklist_stage = worklist_by_stage.get(stage)
         if worklist_stage and worklist_stage.get("status") != status:
@@ -125,7 +139,11 @@ def strict_validation_errors(project, run_id, state, worklist):
             if snapshot_stages != set(STAGE_SEQUENCE):
                 errors.append(f"{result_path.name}.tracking_snapshot 必须包含全部 LoopX 阶段")
         if stage in CONFIRMATION_GATE_STAGES and status == "PASS":
-            if (
+            waived = (
+                result.get("confirmation_waived_by_init_authorization") is True
+                and (state.get("automation_policy") or {}).get("mode") == "auto_until_blocked"
+            )
+            if not waived and (
                 not result.get("confirmed_by")
                 or not result.get("confirmed_at")
                 or not result.get("confirmation_evidence")

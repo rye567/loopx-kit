@@ -1,8 +1,9 @@
-catalog_version: "2"
+catalog_version: "3"
 
 rule_sets:
   common:
     - COMMON-EVIDENCE-001
+    - ARCH-REVIEW-COVERAGE-004
   architecture:
     - ARCH-SIMPLE-001
     - ARCH-BOUNDARY-002
@@ -55,6 +56,25 @@ rules:
     check:
       type: review
       id: solution_design_review
+    evidence_types:
+      - solution
+    unavailable: BLOCKED
+    return_to: solution_design
+
+  - id: ARCH-REVIEW-COVERAGE-004
+    title: 方案审核覆盖需求、最小修改、现有行为、接口契约和验证发布
+    domain: architecture
+    source: standards/architecture-standard.md
+    stages:
+      - solution_review
+    modes:
+      - STANDARD
+      - FULL
+    risk_tags_any: []
+    level: required
+    check:
+      type: review
+      id: solution_review_completeness
     evidence_types:
       - solution
     unavailable: BLOCKED

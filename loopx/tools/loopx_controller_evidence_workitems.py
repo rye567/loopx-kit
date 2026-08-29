@@ -15,6 +15,11 @@ WORK_ITEM_INPUT_FIELDS = {
     "validation",
 }
 WORK_ITEM_LIST_FIELDS = {"risk_tags", "read_scope", "write_scope", "dependencies", "validation"}
+RUNTIME_FIELDS = ("status", "evidence", "failed_by", "return_to", "required_changes")
+
+
+def _same_definition(previous, current):
+    return all(previous.get(field) == current.get(field) for field in WORK_ITEM_INPUT_FIELDS)
 
 
 def validate_work_items(items):
@@ -75,21 +80,56 @@ def validate_work_items(items):
     return errors
 
 
-def runtime_work_items(items):
+def _new_runtime_item(item):
+    return {
+        **item,
+        "status": "pending",
+        "evidence": [],
+        "failed_by": "",
+        "return_to": "",
+        "required_changes": [],
+        "lineage": {"state": "ACTIVE", "reason": "", "replacement_ids": []},
+    }
+
+
+def runtime_work_items(items, existing_items=None, protected_ids=None):
+    """把方案工作项合并为运行态，重录方案时不丢失进度和历史引用。"""
+
     errors = validate_work_items(items)
     if errors:
         raise ValueError("方案工作项校验失败：\n- " + "\n- ".join(errors))
-    return [
-        {
-            **item,
-            "status": "pending",
-            "evidence": [],
-            "failed_by": "",
-            "return_to": "",
-            "required_changes": [],
+    existing = {
+        item.get("id"): item for item in (existing_items or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    proposed_ids = {item["id"] for item in items}
+    protected = set(protected_ids or [])
+    missing_protected = sorted(protected - proposed_ids)
+    if missing_protected:
+        raise ValueError("方案重录不能删除仍有关联开放返工单的工作项：" + ", ".join(missing_protected))
+
+    merged = []
+    for item in items:
+        runtime = _new_runtime_item(item)
+        previous = existing.get(item["id"])
+        # 只有仍处于 ACTIVE 的同定义工作项才复用运行态；改范围或历史项
+        # 重新激活都必须重新开发和验证，不能复用旧 PASS/证据。
+        lineage_state = (previous.get("lineage") or {}).get("state") if previous else None
+        if previous and lineage_state in {None, "ACTIVE"} and _same_definition(previous, item):
+            for field in RUNTIME_FIELDS:
+                runtime[field] = previous.get(field, runtime[field])
+        merged.append(runtime)
+    for item_id, previous in existing.items():
+        if item_id in proposed_ids:
+            continue
+        historical = dict(previous)
+        historical["lineage"] = {
+            "state": "SUPERSEDED",
+            "reason": "最新方案未再声明该工作项，保留运行态和证据以供审计",
+            "replacement_ids": [],
         }
-        for item in items
-    ]
+        merged.append(historical)
+    return merged
 
 
 def known_work_item_ids(worklist):

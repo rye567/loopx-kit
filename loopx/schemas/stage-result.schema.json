@@ -81,6 +81,10 @@
           "path": {
             "type": "string",
             "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "minLength": 64
           }
         }
       }
@@ -126,6 +130,24 @@
         }
       }
     },
+    "reviewed_snapshot_id": {
+      "type": "string",
+      "minLength": 64
+    },
+    "review_input_contract_sha256": {
+      "type": "string",
+      "minLength": 64
+    },
+    "review_source_snapshot_id": {
+      "type": "string"
+    },
+    "review_kind": {
+      "type": "string",
+      "enum": ["FULL", "DELTA"]
+    },
+    "review_baseline_snapshot_id": {
+      "type": "string"
+    },
     "tracking_snapshot": {
       "type": "array"
     },
@@ -141,8 +163,20 @@
     "user_confirmation_required": {
       "type": "boolean"
     },
+    "confirmation_waived_by_init_authorization": {
+      "type": "boolean"
+    },
     "blocked_reason": {
       "type": "string"
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "started_at": {"type": "string"},
+        "finished_at": {"type": "string"},
+        "duration_ms": {"type": "integer"},
+        "attempt": {"type": "integer"}
+      }
     }
   }
 }

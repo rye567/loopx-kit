@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -82,6 +83,14 @@ class ExternalStoreTest(unittest.TestCase):
         with self.store.ExternalRunSession(self.project, self.run_id) as session:
             return json.loads((session.directory / relative).read_text(encoding="utf-8"))
 
+    def force_current_stage(self, stage):
+        with self.store.ExternalRunSession(self.project, self.run_id) as session:
+            state_path = session.directory / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["current_stage"] = stage
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            session.commit()
+
     def write_project_text(self, relative, content):
         path = self.project / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +116,7 @@ class ExternalStoreTest(unittest.TestCase):
         }
 
     def build_solution(self, stage, evidence, document):
-        return {
+        artifact = {
             "artifact_type": "solution", "artifact_version": "1", "run_id": self.run_id,
             "stage": stage, "document": document, "requirement_ids": ["AC-001"],
             "rule_results": [
@@ -135,7 +144,42 @@ class ExternalStoreTest(unittest.TestCase):
                 "write_scope": ["loopx/tools"], "dependencies": [],
                 "validation": ["python3 -m unittest tests.test_loopx_store"],
             }],
+            "extensions": self.requirement_extensions(),
         }
+        if stage == "solution_review":
+            artifact["rule_results"].append(self.rule_result("ARCH-REVIEW-COVERAGE-004", evidence))
+            verdict = {"status": "PASS", "evidence": [evidence], "reason": ""}
+            artifact["extensions"]["review_assurance"] = {
+                "reviewed_snapshot_id": self.recorded_solution_digest(),
+                "review_kind": "FULL",
+                "baseline_snapshot_id": "",
+                "review_scope": ["FULL 流程方案"],
+                "checked_dimensions": {
+                    name: dict(verdict) for name in (
+                        "requirement_coverage", "minimal_modification", "existing_behavior_impact",
+                        "interface_contract", "verification_deployment",
+                    )
+                },
+                "blocking_findings": [],
+                "unknowns": [],
+                "completeness_attestation": "已检查全部适用维度。",
+            }
+        return artifact
+
+    def recorded_solution_digest(self):
+        with self.store.ExternalRunSession(self.project, self.run_id) as session:
+            result = json.loads(
+                (session.directory / "stage-results" / "06-solution-design.json").read_text(encoding="utf-8")
+            )
+            relative = next(item["path"] for item in result["artifacts"] if item["type"] == "solution")
+            prefix = f"docs/loopx/runs/{self.run_id}/"
+            self.assertTrue(relative.startswith(prefix))
+            content = (session.directory / relative[len(prefix):]).read_bytes()
+        return hashlib.sha256(content).hexdigest()
+
+    def requirement_extensions(self):
+        digest = getattr(self, "requirement_manifest_sha256", "")
+        return {"requirement_manifest_sha256": digest} if digest else {}
 
     def build_test_plan(self, stage, evidence, document, rule_ids):
         return {
@@ -145,7 +189,10 @@ class ExternalStoreTest(unittest.TestCase):
                 self.rule_result("TEST-MAPPING-001", evidence),
                 self.rule_result("TEST-CLEANUP-002", evidence),
             ],
-            "mappings": [{"requirement_id": "AC-001", "rule_ids": rule_ids, "test_case_ids": ["TC-001"]}],
+            "mappings": [{
+                "requirement_id": "AC-001", "acceptance_ids": ["AC-001"],
+                "rule_ids": rule_ids, "test_case_ids": ["TC-001"],
+            }],
             "cases": [{
                 "id": "TC-001", "covers": ["AC-001"], "risk_tags": ["core_state_transition"],
                 "preconditions": ["FULL 运行已初始化"],
@@ -156,6 +203,7 @@ class ExternalStoreTest(unittest.TestCase):
                 "expected_result": "PASS",
             }],
             "environment": {"local": ["Python 3"], "ci_required": [], "manual": ["用户确认"]},
+            "extensions": self.requirement_extensions(),
         }
 
     def build_development(self, evidence, document):
@@ -174,6 +222,7 @@ class ExternalStoreTest(unittest.TestCase):
                 "evidence": [evidence], "ci_required": False,
             }],
             "residual_risks": [],
+            "extensions": self.requirement_extensions(),
         }
 
     def build_quality(self, evidence, document):
@@ -185,6 +234,7 @@ class ExternalStoreTest(unittest.TestCase):
             "diff_scope": {
                 "allowed": ["loopx/tools"], "actual": ["loopx/tools/loopx_controller_store.py"], "outside": [],
             },
+            "extensions": self.requirement_extensions(),
         }
 
     def test_init_only_writes_one_user_state_file(self):
@@ -333,6 +383,17 @@ class ExternalStoreTest(unittest.TestCase):
         self.assertFalse(lock.exists())
         self.assertEqual([path.name for path in self.bundle.parent.iterdir()], ["run.json"])
 
+    def test_project_backend_uses_same_per_run_lock(self):
+        first = self.store.ProjectRunSession(self.project, self.run_id, create=True)
+        second = self.store.ProjectRunSession(self.project, self.run_id, create=True)
+        first.__enter__()
+        try:
+            with self.assertRaisesRegex(self.store.StoreError, "正在被进程"):
+                second.__enter__()
+        finally:
+            first.__exit__(None, None, None)
+        self.assertFalse(first.lock.exists())
+
     def test_stale_lock_without_matching_owner_is_not_deleted(self):
         self.init()
         lock = self.bundle.with_name("run.lock")
@@ -432,6 +493,7 @@ class ExternalStoreTest(unittest.TestCase):
 
     def test_failed_stage_record_does_not_keep_imported_artifact(self):
         self.init()
+        self.force_current_stage("solution_design")
         source = self.temp / "invalid-solution.json"
         source.write_text('{"artifact_type":"solution"}\n', encoding="utf-8")
         code, output = self.call(
@@ -627,10 +689,28 @@ AC-001：运行完成并收口。
 使用 FULL。
 """, encoding="utf-8")
         command("import-artifact", self.run_id, "--source", str(spec), "--target", "artifacts/spec.md")
+        manifest = self.write_temp_json("requirement-manifest.json", {
+            "version": "1",
+            "requirement_ids": ["AC-001"],
+            "acceptance_ids": ["AC-001"],
+            "delivery_units": [{
+                "id": "DU-001", "source_refs": ["test"], "requirement_ids": ["AC-001"],
+                "acceptance_ids": ["AC-001"], "modules": ["loopx/tools"], "deploy_targets": [],
+                "depends_on": [], "independently_releasable": True,
+            }],
+            "deferred": [], "delivery_strategy": "SINGLE_RUN", "coupled_reason": "",
+        })
+        command(
+            "import-artifact", self.run_id, "--source", str(manifest),
+            "--target", "artifacts/requirement-manifest.json",
+        )
         spec_logical = f"docs/loopx/runs/{self.run_id}/artifacts/spec.md"
         record("spec_draft", stage_evidence=spec_logical)
         next_stage()
         record("spec_review", stage_evidence=spec_logical)
+        self.requirement_manifest_sha256 = self.read_run_json("state.json")["spec"]["extensions"][
+            "requirement_manifest_sha256"
+        ]
         next_stage()
         command("mode", self.run_id, "--select", "FULL")
         next_stage()

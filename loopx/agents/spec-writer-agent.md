@@ -22,6 +22,8 @@
 - 区分已确认事实和待确认假设。
 - `requirement_interview` 未确认、访谈仍有未回答问题或 `interview.md` 仍含模板占位时，不得生成 Spec。
 - 验收标准必须可验证。
+- 每个活动需求和验收标准必须有稳定 ID；同时维护 `requirement-manifest.json`，不得用下游产物自己的 ID 集合替代规格全集。
+- 多个需求/工单必须声明 delivery units、依赖和是否可独立发布；不自动拆 run 或创建分支。
 - 需求缺口、冲突或不可验证项返回 `CHANGES_REQUIRED` 或 `BLOCKED`。
 - 高风险标签必须保留给后续模式选择和评审。
 

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "requirement_ids",
+    "acceptance_ids",
+    "delivery_units",
+    "deferred",
+    "delivery_strategy",
+    "coupled_reason"
+  ],
+  "properties": {
+    "version": {"type": "string", "enum": ["1"]},
+    "requirement_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "acceptance_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "delivery_units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "source_refs", "requirement_ids", "acceptance_ids", "modules",
+          "deploy_targets", "depends_on", "independently_releasable"
+        ],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "source_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "requirement_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "acceptance_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "modules": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "deploy_targets": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "depends_on": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "independently_releasable": {"type": "boolean"}
+        }
+      }
+    },
+    "deferred": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "reason", "target", "confirmation_evidence"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 3},
+          "target": {"type": "string", "minLength": 1},
+          "confirmation_evidence": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "delivery_strategy": {"type": "string", "enum": ["SINGLE_RUN", "SPLIT_RUNS"]},
+    "coupled_reason": {"type": "string"}
+  }
+}

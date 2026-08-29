@@ -55,6 +55,60 @@ def _mapping_ids(value, id_keys):
     return result
 
 
+REVIEW_DIMENSIONS = (
+    "requirement_coverage",
+    "minimal_modification",
+    "existing_behavior_impact",
+    "interface_contract",
+    "verification_deployment",
+)
+
+
+def validate_review_assurance(artifact):
+    """校验 catalog v3 方案审核声明的结构，不影响旧快照。"""
+
+    errors = []
+    assurance = (artifact.get("extensions") or {}).get("review_assurance")
+    if not isinstance(assurance, dict):
+        errors.append("solution.extensions.review_assurance 缺失")
+        return errors
+    snapshot_id = str(assurance.get("reviewed_snapshot_id") or "")
+    if len(snapshot_id) != 64 or any(char not in "0123456789abcdef" for char in snapshot_id.lower()):
+        errors.append("review_assurance.reviewed_snapshot_id 必须是 64 位内容摘要")
+    if assurance.get("review_kind") not in {"FULL", "DELTA"}:
+        errors.append("review_assurance.review_kind 必须是 FULL 或 DELTA")
+    if assurance.get("review_kind") == "DELTA":
+        baseline = str(assurance.get("baseline_snapshot_id") or "")
+        if len(baseline) != 64 or any(char not in "0123456789abcdef" for char in baseline.lower()):
+            errors.append("DELTA 审核的 baseline_snapshot_id 必须是 64 位内容摘要")
+    _require_nonempty(assurance.get("review_scope"), "review_assurance.review_scope", errors)
+    _require_nonempty(
+        assurance.get("completeness_attestation"),
+        "review_assurance.completeness_attestation",
+        errors,
+    )
+    dimensions = assurance.get("checked_dimensions")
+    if not isinstance(dimensions, dict):
+        errors.append("review_assurance.checked_dimensions 必须是对象")
+        return errors
+    for name in REVIEW_DIMENSIONS:
+        verdict = dimensions.get(name)
+        if not isinstance(verdict, dict):
+            errors.append(f"review_assurance.checked_dimensions 缺少 {name}")
+            continue
+        status = verdict.get("status")
+        if status not in {"PASS", "NOT_APPLICABLE", "UNKNOWN"}:
+            errors.append(f"review_assurance.checked_dimensions.{name}.status 不合法")
+        evidence = verdict.get("evidence")
+        if not isinstance(evidence, list) or any(not isinstance(item, str) or not item for item in evidence):
+            errors.append(f"review_assurance.checked_dimensions.{name}.evidence 必须是字符串数组")
+        if status == "PASS" and not evidence:
+            errors.append(f"review_assurance.checked_dimensions.{name} 通过时必须提供证据")
+        if status == "NOT_APPLICABLE" and len(str(verdict.get("reason") or "")) < 3:
+            errors.append(f"review_assurance.checked_dimensions.{name} 不适用时必须说明理由")
+    return errors
+
+
 def validate_solution_semantics(artifact, risk_tags=None):
     errors = []
     attributes = _quality_attributes(artifact)
@@ -169,12 +223,24 @@ def validate_test_plan_semantics(artifact, required_rule_ids=None):
         if not isinstance(mapping, dict):
             continue
         requirement_id = mapping.get("requirement_id")
+        covered_by_cases = set()
         for test_case_id in mapping.get("test_case_ids") or []:
             case = cases_by_id.get(test_case_id)
             if case is None:
                 errors.append(f"test_plan.mappings[{index}] 引用了未知测试用例：{test_case_id}")
-            elif requirement_id not in (case.get("covers") or []):
+                continue
+            case_coverage = {str(item) for item in case.get("covers") or []}
+            covered_by_cases.update(case_coverage)
+            if requirement_id not in case_coverage:
                 errors.append(f"测试用例 {test_case_id} 未声明覆盖 {requirement_id}")
+        missing_acceptance = {
+            str(item) for item in mapping.get("acceptance_ids") or []
+        } - covered_by_cases
+        if missing_acceptance:
+            errors.append(
+                f"test_plan.mappings[{index}] 的测试用例未覆盖验收标识："
+                + ", ".join(sorted(missing_acceptance))
+            )
     lifecycle = {
         "data_setup": ("data_setup", "setup"),
         "execution": ("execution",),

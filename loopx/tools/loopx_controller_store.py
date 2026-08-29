@@ -398,3 +398,30 @@ class ExternalRunSession:
                 self.bundle.parent.parent.rmdir()
             except OSError:
                 pass
+
+
+class ProjectRunSession(ExternalRunSession):
+    """为项目目录后端复用同一把每运行锁，不改变其文件布局。"""
+
+    def __enter__(self):
+        self.bundle.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.bundle.parent, 0o700)
+        except OSError:
+            pass
+        try:
+            self._acquire_lock()
+            return self
+        except Exception:
+            self._release_lock()
+            raise
+
+    def __exit__(self, exc_type, exc, traceback):
+        self._release_lock()
+        if not self.bundle.exists():
+            try:
+                self.bundle.parent.rmdir()
+                self.bundle.parent.parent.rmdir()
+            except OSError:
+                pass
+        return False

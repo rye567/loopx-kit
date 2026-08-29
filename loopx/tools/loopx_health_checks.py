@@ -81,7 +81,10 @@ def _check_worklist(ctx: HealthContext) -> HealthCheckResult:
     unresolved = [
         f"{item.get('id', '<unknown>')}:{item.get('status', 'PENDING')}"
         for item in items
-        if not isinstance(item, dict) or item.get("status") not in RESOLVED_WORK_ITEM_STATUSES
+        if not isinstance(item, dict) or (
+            item.get("lineage", {}).get("state", "ACTIVE") == "ACTIVE"
+            and item.get("status") not in RESOLVED_WORK_ITEM_STATUSES
+        )
     ]
     if unresolved:
         return _result("worklist_items_resolved", BLOCKED, "worklist 存在未解决项。", unresolved)

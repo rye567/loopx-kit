@@ -39,7 +39,10 @@ ARTIFACT_SCHEMA_FILES = {
     "performance_result": "performance-result.schema.json",
     "security_result": "security-result.schema.json",
 }
-REVIEW_CHECK_STAGES = {"solution_design_review": "solution_review"}
+REVIEW_CHECK_STAGES = {
+    "solution_design_review": "solution_review",
+    "solution_review_completeness": "solution_review",
+}
 KNOWN_CHECKS = {
     "schema": {"solution_schema", "performance_result_schema"},
     "builtin": {
@@ -52,7 +55,7 @@ KNOWN_CHECKS = {
         "test_plan_coverage",
         "cleanup_plan_complete",
     },
-    "review": {"solution_design_review"},
+    "review": {"solution_design_review", "solution_review_completeness"},
 }
 
 

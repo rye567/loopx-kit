@@ -9,7 +9,7 @@
 - 每条用例的租户/用户/店铺/平台账号/业务记录。
 - 数据创建方式、唯一 `runId` 或前缀。
 - API 响应、持久化副作用、DB/Redis/MQ/文件/任务/mock 清理和清理验证。
-- 全部验收标准和适用必需规则到测试用例的双向映射。
+- 全部需求 ID、验收 ID 和适用必需规则到测试用例的双向映射；`requirement_id` 与 `acceptance_ids` 分字段记录，禁止假设二者相同。
 - 正常、边界、非法输入、失败恢复和回归；核心状态变更需判断重试、重复提交和幂等。
 - 本地服务、mock、三方工具缺口及其 `SKIPPED`、`CI_REQUIRED` 或 `BLOCKED` 归类。
 - 符合 `test-plan.schema.json` 的产物、工作项更新和 `stage_result`。

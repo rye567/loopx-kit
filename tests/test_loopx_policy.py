@@ -30,7 +30,7 @@ class CatalogTest(unittest.TestCase):
         self.catalog, self.catalog_path = load_catalog(ROOT)
 
     def test_valid_catalog(self):
-        self.assertEqual(self.catalog["catalog_version"], "2")
+        self.assertEqual(self.catalog["catalog_version"], "3")
         self.assertEqual(validate_catalog(self.catalog, self.catalog_path), [])
         self.assertEqual(
             set(self.catalog["rule_sets"]),
@@ -123,6 +123,12 @@ class PolicyTest(unittest.TestCase):
                     self.assertTrue(expected_rules.issubset(selected))
                     if tags == ["docs_only"]:
                         self.assertNotIn("SEC-CONTROLS-001", selected)
+
+    def test_full_without_risk_still_requires_complete_solution_review(self):
+        with tempfile.TemporaryDirectory(prefix="loopx-policy-") as raw:
+            snapshot = build_policy_snapshot(Path(raw), "FULL", [])
+        selected = {rule["id"] for rule in snapshot["rules"]}
+        self.assertIn("ARCH-REVIEW-COVERAGE-004", selected)
 
     def test_policy_precedence_and_downgrade(self):
         with tempfile.TemporaryDirectory(prefix="loopx-std-") as raw:

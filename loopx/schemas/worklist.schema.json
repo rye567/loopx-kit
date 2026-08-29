@@ -129,6 +129,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "lineage": {
+            "type": "object",
+            "properties": {
+              "state": {"type": "string", "enum": ["ACTIVE", "SUPERSEDED", "MERGED"]},
+              "reason": {"type": "string"},
+              "replacement_ids": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
           }
         }
       }

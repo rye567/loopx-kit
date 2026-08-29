@@ -26,7 +26,8 @@ from loopx_controller_repair import (
     cmd_review_feedback,
 )
 from loopx_controller_state import default_run_id, resolve_run_id
-from loopx_controller_store import ExternalRunSession, StoreError, uses_project_backend
+from loopx_controller_store import ExternalRunSession, ProjectRunSession, StoreError, uses_project_backend
+from loopx_controller_io import get_run_dir, recover_atomic_writes
 
 # core 模块承载其余命令实现；此处集中 import 供 build_parser 绑定。
 from loopx_controller_core import (
@@ -97,6 +98,12 @@ def build_parser():
     init.add_argument("--run-id")
     init.add_argument("--mode", choices=["auto", "LIGHT", "STANDARD", "FULL"], default="auto")
     init.add_argument("--risk-tags", nargs="*", default=[])
+    init.add_argument(
+        "--automation-policy",
+        choices=["gated", "auto_until_blocked"],
+        default="gated",
+        help="gated 保留人工确认；auto_until_blocked 仅凭本次 init 显式授权跳过确认门，遇阻塞仍停止。",
+    )
     init.add_argument("--project", default=".")
     init.set_defaults(func=cmd_init)
 
@@ -274,20 +281,28 @@ def main(argv=None, stdout=None):
         print(f"状态存储错误：{exc}", file=stdout)
         return 1
     if project_backend:
-        imported_backups = []
-        if args.command == "record-stage" and args.artifact_file:
-            try:
-                args.artifact.extend(import_artifact_files(
-                    project, run_id, args.stage, args.artifact_file, imported_backups,
-                ))
-            except (OSError, ValueError) as exc:
-                restore_imported_artifacts(imported_backups)
-                print(f"无法导入结构化产物：{exc}", file=stdout)
-                return 1
-        result = args.func(args, stdout)
-        if args.command == "record-stage" and result != 0:
-            restore_imported_artifacts(imported_backups)
-        return result
+        try:
+            with ProjectRunSession(project, run_id, create=args.command == "init"):
+                run_directory = get_run_dir(project, run_id)
+                if run_directory.is_dir():
+                    recover_atomic_writes(run_directory)
+                imported_backups = []
+                if args.command == "record-stage" and args.artifact_file:
+                    try:
+                        args.artifact.extend(import_artifact_files(
+                            project, run_id, args.stage, args.artifact_file, imported_backups,
+                        ))
+                    except (OSError, ValueError) as exc:
+                        restore_imported_artifacts(imported_backups)
+                        print(f"无法导入结构化产物：{exc}", file=stdout)
+                        return 1
+                result = args.func(args, stdout)
+                if args.command == "record-stage" and result != 0:
+                    restore_imported_artifacts(imported_backups)
+                return result
+        except (StoreError, OSError, RuntimeError) as exc:
+            print(f"状态存储错误：{exc}", file=stdout)
+            return 1
 
     buffered = io.StringIO()
     try:

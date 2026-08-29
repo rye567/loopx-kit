@@ -17,6 +17,7 @@
     "schemas": [
       "loopx/schemas/standard-catalog.schema.json",
       "loopx/schemas/project-policy.schema.json",
+      "loopx/schemas/requirement-manifest.schema.json",
       "loopx/schemas/solution.schema.json",
       "loopx/schemas/test-plan.schema.json",
       "loopx/schemas/development-evidence.schema.json",

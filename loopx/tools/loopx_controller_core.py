@@ -26,9 +26,12 @@ from loopx_controller_flow import (
 )
 from loopx_controller_io import (
     append_event,
+    atomic_write_texts,
+    event_line,
     get_run_dir,
     json_text,
     load_state,
+    load_worklist,
     project_path,
     save_state,
 )
@@ -42,8 +45,11 @@ from loopx_controller_state import (
     mode_decision_state,
     mode_rank,
     resolve_run_id,
+    start_stage_timing,
     update_worklist_state,
+    update_worklist_state_data,
 )
+from loopx_controller_yaml import dump_worklist
 
 
 def cmd_status(args, stdout):
@@ -137,6 +143,7 @@ def cmd_mode(args, stdout):
         return 1
     new_state["mode"] = selected
     new_state["current_stage"] = "mode_selection"
+    start_stage_timing(new_state, "mode_selection")
     new_state["active_agent"] = new_state.get("stage_owners", DEFAULT_STAGE_OWNERS)["mode_selection"]
     new_state["next_action"] = "solution_design"
     decision["selected"] = selected
@@ -208,12 +215,30 @@ def advance_to_stage(project, run_id, state, target, stdout, fail_banner="FAIL �
         for blocker in blockers:
             print(f"- {blocker}", file=stdout)
         return 1
-    state["current_stage"] = target
-    state["active_agent"] = state.get("stage_owners", DEFAULT_STAGE_OWNERS).get(target, target)
-    state["next_action"] = default_next_stage(target)
-    save_state(project, run_id, state)
-    update_worklist_state(project, state, target, "IN_PROGRESS")
-    append_event(get_run_dir(project, run_id), {"type": "advanced", "to": target})
+    new_state = copy.deepcopy(state)
+    new_state["current_stage"] = target
+    start_stage_timing(new_state, target)
+    new_state["active_agent"] = new_state.get("stage_owners", DEFAULT_STAGE_OWNERS).get(target, target)
+    new_state["next_action"] = default_next_stage(target)
+    directory = get_run_dir(project, run_id)
+    try:
+        worklist_path, worklist = load_worklist(project, state)
+        new_worklist = copy.deepcopy(worklist)
+        update_worklist_state_data(new_worklist, new_state, target, "IN_PROGRESS")
+        events_path = directory / "events.jsonl"
+        try:
+            old_events = events_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            old_events = ""
+        atomic_write_texts({
+            directory / "state.json": json_text(new_state),
+            worklist_path: dump_worklist(new_worklist),
+            events_path: old_events + event_line({"type": "advanced", "to": target}),
+        })
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"{fail_banner}", file=stdout)
+        print(f"- 阶段推进状态提交失败：{exc}", file=stdout)
+        return 1
     print(f"PASS 已进入阶段：{target}", file=stdout)
     return 0
 
@@ -223,6 +248,8 @@ def cmd_record_stage(args, stdout):
     try:
         run_id = resolve_run_id(project, args.run_id)
         state = load_state(project, run_id)
+        if args.stage != state.get("current_stage"):
+            raise ValueError(f"当前阶段为 {state.get('current_stage')}，不能记录阶段 {args.stage}")
         artifacts = parse_artifact_arguments(args.artifact) if is_v2_run(state) else {}
         if not is_v2_run(state) and args.artifact:
             raise ValueError("v1 历史运行不接受 --artifact；请继续使用原有 --evidence")

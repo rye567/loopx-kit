@@ -17,7 +17,7 @@
 7. 开发阶段默认 auto：满足写入条件后，可直接修改受影响代码、测试和阶段文档，并运行编译、单元测试和定向测试。
 8. auto 不跳过 sandbox、permissions、hooks 或高风险审批。
 9. 高风险动作仍需确认：git commit/push、强推、清库、无 WHERE 删除、生产/联调写入、越权目录写入、破坏性删除、真实外部系统调用。
-10. 当前处于 LoopX 验证期：只有需求采访和方案审核 `PASS` 后必须暂停并请求用户确认；其余阶段 `PASS` 后不需要人工确认。
+10. 默认 `automation_policy=gated`：只有需求采访和方案审核 `PASS` 后必须暂停并请求用户确认；显式 `auto_until_blocked` 只豁免这两个确认门，不跳过任何阶段，遇到 `BLOCKED` 或高风险动作仍停止。
 11. 本地 `PASS` 只代表本地验证通过；没有接入 PR/CI 时，最终报告必须显式写出“CI/远端未覆盖”。
 12. 整个 LoopX 流程完成前必须执行 `/health`；未执行、失败或无法运行时，不得宣称最终完整通过。
 13. `/health` 不强依赖三方插件；核心健康检查必须在零插件环境下可运行，三方工具只能作为增强检查。
@@ -109,7 +109,7 @@ Provider 结果写入逻辑路径 `docs/loopx/runs/<run_id>/artifacts/integratio
 
 控制器层面使用中间状态表达人工确认：agent 在 `requirement_interview` 或 `solution_review` 记录 `PASS` 时，实际落库为 `NEED_HUMAN`，`next_action` 为 `confirm-stage --stage <stage>`。只有用户确认后执行 `confirm-stage`，该阶段才会变为 `PASS` 并允许继续推进。需求采访确认是生成 Spec 的前置条件：`requirement_interview NEED_HUMAN -> confirm-stage -> requirement_interview PASS -> spec_draft`。
 
-如果用户明确说“本次全自动”“跳过人工确认”或“恢复自动推进”，才可以取消本次确认要求。高风险动作仍必须单独确认。
+如果用户明确说“本次全自动”“跳过人工确认”或“恢复自动推进”，初始化时可使用 `--automation-policy auto_until_blocked`。授权来源和时间写入 state，阶段结果记录 `confirmation_waived_by_init_authorization`，不得伪造 `confirmed_by=user`。高风险动作仍必须单独确认。
 
 ## 阶段
 
@@ -117,10 +117,10 @@ Provider 结果写入逻辑路径 `docs/loopx/runs/<run_id>/artifacts/integratio
 1. 需求接收：记录原始需求、范围线索和初始风险。
 2. 需求采访：根据原始问题或需求向用户提问，确认业务规则、验收标准、边界情况和开放问题；未得到回答不得生成或通过 Spec。
 3. Spec 草稿：把采访结果沉淀为可测试的需求规格。
-4. Spec 审核：检查完整性、歧义、范围和可测试性。
+4. Spec 审核：检查完整性、歧义、范围和可测试性；冻结 `requirement-manifest.json` 的活动需求、验收标识、交付单元和延期项摘要。
 5. 执行等级选择：确认 `LIGHT`、`STANDARD` 或 `FULL`，记录 accepted risk。
 6. 方案设计：方案、数据流、接口、迁移/兼容计划、影响范围。
-7. 方案审核：需求匹配、设计原则、项目 harness、风险审核结论。
+7. 方案审核：需求匹配、设计原则、项目 harness、风险审核结论；分别给出需求覆盖、最小修改、现有行为影响、接口契约、验证与发布五项子结论。
 8. 测试用例设计：业务/API 数据准备、执行入口、断言、清理。
 9. 测试用例审核：覆盖率、清理策略、风险处理结果。
 10. 开发：实现、补测试、集成、最小必要验证。
@@ -204,6 +204,17 @@ stage_result:
 
 每个 worklist item 至少包含：`id`、`title`、`status`、`risk_tags`、`owner_agent`、`read_scope`、`write_scope`、`dependencies`、`validation`、`evidence`、`failed_by`、`return_to`、`required_changes`。
 
+方案重录必须按 item ID 合并运行态：工作定义完全相同才继承状态和证据；范围、依赖或验证方式变化时，即使 ID 相同也必须重置为 `pending`。仍有开放返工单的 item 不得删除；不再属于最新方案且无开放返工单的 item 保留历史证据，并通过独立 `lineage.state=SUPERSEDED|MERGED` 标记，不把 lineage 混入执行状态。
+
+## FULL 执行优化（逻辑阶段不变）
+
+- 0–16 的阶段和顺序保持不变；默认 `gated` 放行语义保持不变，显式 `auto_until_blocked` 只豁免两个确认门且不跳阶段。其他优化只能发生在阶段内部和只读候选计算中。
+- 首轮审核应一次性覆盖全部适用维度和 blocking findings；方案设计通过时，控制器把 JSON 文件 SHA-256 冻结到 stage result，`reviewed_snapshot_id` 必须与它一致。返工复核可用 `DELTA`，但 `baseline_snapshot_id` 必须引用 state 中保留的上一次成功审核快照，审核失败覆盖阶段结果时不得丢失；策略、需求全集、规格或源码快照变化时必须恢复 `FULL`。源码快照覆盖 Git HEAD、已跟踪 diff 和未跟踪文件内容，不包含 `docs/loopx/runs/` 中 controller 自身生成的运行状态。
+- 开发后的质量审计、代码审查和测试分析可在同一冻结 snapshot 上并行生成候选结果；候选 agent 禁止调用 `record-stage`，由 controller 单点聚合并仍按 11→12→13 写入。
+- 不并行共享同一 `target/`、端口、数据库夹具或清理数据的命令。真实 API、DB、Redis、MQ、XXL、时间敏感、随机或并发测试不得使用结果缓存。
+- state 和 `stage_result.timing` 记录阶段开始、完成、耗时和 attempt；后续优化必须基于这些数据区分执行、等待和返工耗时。
+- `record-stage` 只接受 `state.current_stage`；返工由 `fail-review` / `review-feedback` 显式回退。项目目录后端也使用每个 run 的单写者锁；初始化、阶段记录/推进/确认和返工等关键多文件状态转换使用事务日志，中断时在下一条命令执行前恢复。
+
 `/health` 和最终报告必须检查：
 
 - 是否仍有 `CHANGES_REQUIRED` 或 `BLOCKED` item。
@@ -217,6 +228,8 @@ stage_result:
 
 ```bash
 python tools/loopx_controller.py init "需求描述" --mode auto --risk-tags tenant_scope core_state_transition api_contract
+# 只有用户明确授权本次自动推进时使用；阶段顺序和高风险确认不变
+python tools/loopx_controller.py init "需求描述" --mode FULL --automation-policy auto_until_blocked
 python tools/loopx_controller.py status
 python tools/loopx_controller.py status --tracking
 python tools/loopx_controller.py interview <run_id>
@@ -225,6 +238,7 @@ python tools/loopx_controller.py import-artifact <run_id> --source /tmp/intervie
 python tools/loopx_controller.py record-stage --run-id <run_id> --stage requirement_interview --status PASS --evidence docs/loopx/runs/<run_id>/artifacts/interview.md
 python tools/loopx_controller.py confirm-stage --run-id <run_id> --stage requirement_interview --evidence docs/loopx/<date>-<slug>/interview-confirmation.md
 python tools/loopx_controller.py spec <run_id>
+# 编辑 spec.md 的同时补全自动生成的 artifacts/requirement-manifest.json
 python tools/loopx_controller.py record-stage --run-id <run_id> --stage spec_draft --status PASS --evidence docs/loopx/runs/<run_id>/artifacts/spec.md
 python tools/loopx_controller.py record-stage --run-id <run_id> --stage spec_review --status PASS --evidence docs/loopx/runs/<run_id>/artifacts/spec.md
 python tools/loopx_controller.py mode <run_id> --select FULL

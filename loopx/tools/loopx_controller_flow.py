@@ -37,10 +37,13 @@ from loopx_controller_state import (
     interview_state,
     mode_decision_state,
     spec_state,
+    finish_stage_timing,
+    start_stage_timing,
     update_worklist_state,
     update_worklist_state_data,
 )
 from loopx_controller_tickets import iter_repair_tickets
+from loopx_controller_requirements import apply_requirement_freeze
 from loopx_controller_yaml import YamlSubsetError, dump_worklist
 
 
@@ -87,8 +90,19 @@ def is_waiting_confirmation(stage, status):
     return stage in CONFIRMATION_GATE_STAGES and status == "NEED_HUMAN"
 
 
-def stored_stage_status(stage, status):
+def automation_is_enabled(state):
+    policy = state.get("automation_policy") or {}
+    return (
+        policy.get("mode") == "auto_until_blocked"
+        and policy.get("authorized_by") == "user_cli"
+        and bool(policy.get("authorized_at"))
+    )
+
+
+def stored_stage_status(stage, status, state=None):
     if stage in CONFIRMATION_GATE_STAGES and status == "PASS":
+        if automation_is_enabled(state or {}):
+            return "PASS"
         return "NEED_HUMAN"
     return status
 
@@ -107,6 +121,8 @@ def stage_result_path(directory, stage):
 def stage_result_next_action(stage, status, stored_status, return_to, next_action):
     if stored_status == "NEED_HUMAN":
         return confirmation_next_action(stage)
+    if stored_status == "BLOCKED":
+        return f"await_user:{next_action or return_to or stage}"
     if next_action:
         return next_action
     if status == "CHANGES_REQUIRED":
@@ -126,6 +142,7 @@ def build_stage_result(
     blocked_reason,
     artifacts=None,
     rule_results=None,
+    review_binding=None,
 ):
     snapshot_state = dict(state)
     snapshot_state["stages"] = dict(state.get("stages", {}))
@@ -148,13 +165,18 @@ def build_stage_result(
         },
         "user_confirmation_required": stored_status in {"CHANGES_REQUIRED", "BLOCKED", "NEED_HUMAN"},
         "blocked_reason": blocked_reason,
+        "timing": dict((state.get("stage_timing") or {}).get(stage) or {}),
     }
+    if stage in CONFIRMATION_GATE_STAGES and agent_result == "PASS" and stored_status == "PASS":
+        result["confirmation_waived_by_init_authorization"] = automation_is_enabled(state)
     if is_v2_run(state):
         result.update({
             "contract_version": CONTRACT_VERSION,
             "artifacts": artifacts or [],
             "rule_results": rule_results or [],
         })
+        if review_binding:
+            result.update(review_binding)
     return result
 
 
@@ -193,6 +215,13 @@ def apply_stage_progression(state, stage, status, stored_status, return_to, next
     state["active_agent"] = state.get("stage_owners", DEFAULT_STAGE_OWNERS).get(stage, stage)
     if stored_status == "NEED_HUMAN":
         state["next_action"] = next_action
+    if stored_status == "BLOCKED":
+        state["status"] = "BLOCKED"
+        state["current_stage"] = stage
+        state["next_action"] = next_action
+        return
+    if state.get("status") == "BLOCKED":
+        state["status"] = "ACTIVE"
     if status != "CHANGES_REQUIRED":
         return
     # 回退会清理后续阶段，防止旧 PASS 继续影响新的方案或实现。
@@ -200,6 +229,7 @@ def apply_stage_progression(state, stage, status, stored_status, return_to, next
     state["current_stage"] = target
     state["active_agent"] = state.get("stage_owners", DEFAULT_STAGE_OWNERS).get(target, target)
     state["next_action"] = f"repair_{target}"
+    start_stage_timing(state, target)
     for later_stage in STAGE_SEQUENCE[stage_index(target) + 1:]:
         if later_stage != stage:
             state["stages"].pop(later_stage, None)
@@ -218,6 +248,11 @@ def _same_stage_submission(existing, candidate):
         "artifacts",
         "rule_results",
         "blocked_reason",
+        "reviewed_snapshot_id",
+        "review_input_contract_sha256",
+        "review_source_snapshot_id",
+        "review_kind",
+        "review_baseline_snapshot_id",
     )
     return all(existing.get(key) == candidate.get(key) for key in keys)
 
@@ -247,10 +282,12 @@ def record_prepared_v2_stage_result(
             raise ValueError(f"无法读取 worklist，阶段结果未写入：{exc}") from exc
     affected_work_items = affected_work_items or []
     agent_result = status
-    stored_status = stored_stage_status(stage, status)
+    stored_status = stored_stage_status(stage, status, state)
     computed_next_action = stage_result_next_action(stage, status, stored_status, return_to, next_action)
+    new_state = copy.deepcopy(state)
+    finish_stage_timing(new_state, stage)
     result = build_stage_result(
-        state,
+        new_state,
         stage,
         agent_result,
         stored_status,
@@ -261,6 +298,7 @@ def record_prepared_v2_stage_result(
         blocked_reason,
         artifacts=prepared["artifacts"],
         rule_results=prepared["rule_results"],
+        review_binding=prepared.get("review_binding"),
     )
     result_path = stage_result_path(directory, stage)
     if result_path.exists():
@@ -276,9 +314,13 @@ def record_prepared_v2_stage_result(
         ):
             return existing
 
-    new_state = copy.deepcopy(state)
     new_state.setdefault("stages", {})[stage] = stored_status
     apply_stage_metadata(new_state, run_id, stage, status, stored_status)
+    if prepared.get("spec_freeze"):
+        apply_requirement_freeze(new_state, prepared["spec_freeze"])
+    if stage == "solution_review" and agent_result == "PASS" and prepared.get("review_binding"):
+        new_state["last_solution_review"] = dict(prepared["review_binding"])
+        new_state["source_baseline"] = prepared.get("review_source_baseline") or "UNAVAILABLE"
     apply_stage_progression(new_state, stage, status, stored_status, return_to, computed_next_action)
     new_worklist = copy.deepcopy(worklist)
     if prepared["solution_items"] is not None:
@@ -306,6 +348,7 @@ def record_prepared_v2_stage_result(
         "status": stored_status,
         "agent_result": agent_result,
         "return_to": return_to,
+        "timing": result.get("timing", {}),
     })
     files = dict(extra_files or {})
     files.update({
@@ -396,8 +439,9 @@ def record_stage_result(
             blocked_reason,
         )
     agent_result = status
-    stored_status = stored_stage_status(stage, status)
+    stored_status = stored_stage_status(stage, status, state)
     computed_next_action = stage_result_next_action(stage, status, stored_status, return_to, next_action)
+    finish_stage_timing(state, stage)
     result = build_stage_result(
         state,
         stage,
@@ -420,6 +464,7 @@ def record_stage_result(
         "status": stored_status,
         "agent_result": agent_result,
         "return_to": return_to,
+        "timing": result.get("timing", {}),
     })
     return result
 
@@ -518,21 +563,36 @@ def confirm_stage(project, run_id, stage, evidence, confirmed_by):
         ]
         if not evidence:
             raise ValueError("v2 用户确认必须提供至少一个有效证据文件")
+    try:
+        worklist_path, worklist = load_worklist(project, state)
+    except (FileNotFoundError, YamlSubsetError) as exc:
+        raise ValueError(f"无法读取 worklist，阶段确认未写入：{exc}") from exc
     confirmation = build_confirmation(evidence, confirmed_by)
-    state.setdefault("stages", {})[stage] = "PASS"
-    state.setdefault("confirmations", {})[stage] = confirmation
+    new_state = copy.deepcopy(state)
+    new_result = copy.deepcopy(result)
+    new_worklist = copy.deepcopy(worklist)
+    new_state.setdefault("stages", {})[stage] = "PASS"
+    new_state.setdefault("confirmations", {})[stage] = confirmation
     if stage == "requirement_interview":
-        state.setdefault("interview", interview_state(run_id))["status"] = "PASS"
-    state["next_action"] = CONFIRMATION_GATE_STAGES[stage]
-    apply_confirmation_result(result, state, stage, confirmation)
-    write_json(result_path, result)
-
-    save_state(project, run_id, state)
-    update_worklist_state(project, state, stage, "PASS")
-    append_event(directory, {
+        new_state.setdefault("interview", interview_state(run_id))["status"] = "PASS"
+    new_state["next_action"] = CONFIRMATION_GATE_STAGES[stage]
+    apply_confirmation_result(new_result, new_state, stage, confirmation)
+    update_worklist_state_data(new_worklist, new_state, stage, "PASS")
+    events_path = directory / "events.jsonl"
+    try:
+        old_events = events_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        old_events = ""
+    new_event = event_line({
         "type": "stage_confirmed",
         "stage": stage,
         "confirmed_by": confirmed_by,
         "evidence": evidence,
+    })
+    atomic_write_texts({
+        result_path: json_text(new_result),
+        directory / "state.json": json_text(new_state),
+        worklist_path: dump_worklist(new_worklist),
+        events_path: old_events + new_event,
     })
     return confirmation

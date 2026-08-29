@@ -91,6 +91,7 @@ class LoopXStandardizationTest(unittest.TestCase):
         schemas = {
             "standard-catalog.schema.json",
             "project-policy.schema.json",
+            "requirement-manifest.schema.json",
             "solution.schema.json",
             "test-plan.schema.json",
             "development-evidence.schema.json",
@@ -105,6 +106,10 @@ class LoopXStandardizationTest(unittest.TestCase):
                 schema = json.loads((ROOT / "loopx" / "schemas" / name).read_text(encoding="utf-8"))
                 self.assertEqual(schema["type"], "object")
                 self.assertFalse(schema.get("additionalProperties", True))
+
+        for manifest_path, prefix in ((ROOT / "manifest.json", "loopx/"), (ROOT / "loopx" / "manifest.json", "")):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertIn(f"{prefix}schemas/requirement-manifest.schema.json", manifest["resources"]["schemas"])
 
     def test_catalog_references_existing_rules_sources_and_artifacts(self):
         tools = ROOT / "loopx" / "tools"

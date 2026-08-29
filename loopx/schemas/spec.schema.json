@@ -47,6 +47,14 @@
       "items": {
         "type": "string"
       }
+    },
+    "extensions": {
+      "type": "object",
+      "properties": {
+        "requirement_manifest": {"type": "string"},
+        "requirement_manifest_sha256": {"type": "string"},
+        "spec_artifact_sha256": {"type": "string"}
+      }
     }
   }
 }
