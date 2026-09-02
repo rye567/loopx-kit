@@ -39,7 +39,6 @@ from loopx_controller_state import (
     spec_state,
     finish_stage_timing,
     start_stage_timing,
-    update_worklist_state,
     update_worklist_state_data,
 )
 from loopx_controller_tickets import iter_repair_tickets

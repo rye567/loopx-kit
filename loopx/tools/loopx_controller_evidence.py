@@ -300,7 +300,7 @@ def prepare_v2_stage_record(
                 project, state, artifact, recorded_result=recorded_result,
             )
             if binding_errors:
-                raise ValueError(f"solution 产物审核绑定校验失败：\n- " + "\n- ".join(binding_errors))
+                raise ValueError("solution 产物审核绑定校验失败：\n- " + "\n- ".join(binding_errors))
             review_binding = {
                 "reviewed_snapshot_id": reviewed_snapshot_id,
                 "review_input_contract_sha256": contract_digest,
